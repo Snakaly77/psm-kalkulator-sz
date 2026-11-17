@@ -2,6 +2,7 @@ package com.example.lab4
 
 import android.content.res.Configuration
 import android.os.Bundle
+import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -34,10 +35,14 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import com.example.lab4.ui.theme.LAB4Theme
+import org.mariuszgromada.math.mxparser.Expression
+import org.mariuszgromada.math.mxparser.License
+import java.text.DecimalFormat
+import java.text.DecimalFormatSymbols
+import java.util.Locale
+import kotlin.math.abs
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -51,15 +56,80 @@ class MainActivity : ComponentActivity() {
             }
         }
     }
+
+    // zapis stanu w obiekcie Bundle podczas obrotu ekranu
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        Log.d("CalcState", "Zapisany stan Bundle: $outState")
+        for (key in outState.keySet()) {
+            Log.d("CalcState", "Klucz: $key -> Wartość: ${outState.get(key)}")
+        }
+    }
 }
 
+// logika obliczen
+
+sealed interface CalcOutcome {
+    data object Empty : CalcOutcome              // brak wyniku i brak bledu
+    data class Success(val formatted: String) : CalcOutcome // git wynik
+    data class Error(val message: String) : CalcOutcome     // czytelny komunikat
+}
+
+fun evaluateExpression(rawExpression: String): CalcOutcome {
+    // Deklaracja niekomercyjnego użycia mXparser (wymog licencji)
+    License.iConfirmNonCommercialUse("Student")
+
+    val trimmed = rawExpression.trim()
+    if (trimmed.isEmpty()) return CalcOutcome.Empty
+
+    // polski separator dziesietny
+    val normalized = trimmed.replace(',', '.')
+
+    // sprawdzanie czy wyrazenie jest niedokonczone np. nawias otwarty
+    val lastChar = normalized.last()
+    val openParens = normalized.count { it == '(' }
+    val closeParens = normalized.count { it == ')' }
+
+    if (lastChar in listOf('+', '-', '*', '/', '^', '.', '(') || openParens > closeParens) {
+        return CalcOutcome.Empty
+    }
+
+    // bledy dziedziny np dzielenie przez 0
+    val expression = Expression(normalized)
+    val value = expression.calculate()
+
+    if (value.isNaN() || value.isInfinite()) {
+        return when {
+            normalized.contains(Regex("/0(\\.0*)?($|[^0-9.])")) ->
+                CalcOutcome.Error("Błąd: dzielenie przez zero")
+            normalized.contains("sqrt(-") || normalized.contains("ln(-") || normalized.contains("ln(0") ->
+                CalcOutcome.Error("Błąd: wartość poza dziedziną")
+            else ->
+                CalcOutcome.Error("Niepoprawne wyrażenie")
+        }
+    }
+
+    return CalcOutcome.Success(formatCalcNumber(value))
+}
+
+fun formatCalcNumber(value: Double): String {
+    if (value == 0.0) return "0"
+    val absVal = abs(value)
+    val symbols = DecimalFormatSymbols(Locale.US)
+
+    // notacja naukowa dla szerokiego przedzialu liczb
+    return if (absVal >= 1e12 || absVal < 1e-6) {
+        DecimalFormat("0.######E0", symbols).format(value)
+    } else {
+        // zaokraglanie do maks 8 miejsca po przecinku
+        DecimalFormat("0.########", symbols).format(value)
+    }
+}
+
+// przyciski
 
 enum class ButtonRole {
-    DIGIT,      // cyfry i przecinek
-    OPERATOR,   // działania podstawowe i nawiasy
-    ACTION,     // czyszczenie i kasowanie znaku
-    SCIENTIFIC, // funkcje naukowe
-    EQUALS      // przycisk (=)
+    DIGIT, OPERATOR, ACTION, SCIENTIFIC, EQUALS
 }
 
 sealed interface CalcAction {
@@ -97,7 +167,7 @@ val basicButtons = listOf(
     CalcButton("−", ButtonRole.OPERATOR, CalcAction.Insert("-")),
 
     CalcButton("0", ButtonRole.DIGIT, CalcAction.Insert("0")),
-    CalcButton(".", ButtonRole.DIGIT, CalcAction.Insert(".")),
+    CalcButton(",", ButtonRole.DIGIT, CalcAction.Insert(",")),
     CalcButton("+", ButtonRole.OPERATOR, CalcAction.Insert("+")),
     CalcButton("=", ButtonRole.EQUALS, CalcAction.Evaluate)
 )
@@ -114,31 +184,50 @@ val scientificButtons = listOf(
     CalcButton("e", ButtonRole.SCIENTIFIC, CalcAction.Insert("e"))
 )
 
+// interfejs uzytkownika
 
 @Composable
 fun CalculatorScreen(modifier: Modifier = Modifier) {
+    // rememberSaveable zapisuje stan w Bundle przy obrocie ekranu (Zadanie 1)
     var expression by rememberSaveable { mutableStateOf("") }
-    var previewResult by rememberSaveable { mutableStateOf("") }
+    var resultText by rememberSaveable { mutableStateOf("") }
+    var isError by rememberSaveable { mutableStateOf(false) }
 
-    // Rozpoznanie orientacji ekranu (Zadanie 3.1)
     val configuration = LocalConfiguration.current
     val isLandscape = configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
 
     fun onButtonClick(action: CalcAction) {
         when (action) {
-            is CalcAction.Insert -> expression += action.textToInsert
+            is CalcAction.Insert -> {
+                expression += action.textToInsert
+                isError = false
+            }
             CalcAction.Clear -> {
                 expression = ""
-                previewResult = ""
+                resultText = ""
+                isError = false
             }
             CalcAction.Backspace -> {
                 if (expression.isNotEmpty()) {
                     expression = expression.dropLast(1)
+                    isError = false
                 }
             }
             CalcAction.Evaluate -> {
-                // Obliczenia będą zaimplementowane w Konspekcie 5
-                previewResult = if (expression.isNotEmpty()) "= $expression" else ""
+                when (val outcome = evaluateExpression(expression)) {
+                    CalcOutcome.Empty -> {
+                        resultText = ""
+                        isError = false
+                    }
+                    is CalcOutcome.Success -> {
+                        resultText = outcome.formatted
+                        isError = false
+                    }
+                    is CalcOutcome.Error -> {
+                        resultText = outcome.message
+                        isError = true
+                    }
+                }
             }
         }
     }
@@ -151,11 +240,13 @@ fun CalculatorScreen(modifier: Modifier = Modifier) {
     ) {
         DisplayPanel(
             expression = expression,
-            result = previewResult,
+            result = resultText,
+            isError = isError,
             modifier = Modifier
                 .fillMaxWidth()
                 .weight(if (isLandscape) 0.32f else 0.28f)
         )
+
         if (isLandscape) {
             Row(
                 modifier = Modifier
@@ -193,17 +284,18 @@ fun CalculatorScreen(modifier: Modifier = Modifier) {
     }
 }
 
-
 @Composable
 fun DisplayPanel(
     expression: String,
     result: String,
+    isError: Boolean,
     modifier: Modifier = Modifier
 ) {
-    val scrollState = rememberScrollState()
+    val exprScroll = rememberScrollState()
+    val resScroll = rememberScrollState()
 
     LaunchedEffect(expression) {
-        scrollState.scrollTo(scrollState.maxValue)
+        exprScroll.scrollTo(exprScroll.maxValue)
     }
 
     Card(
@@ -223,28 +315,27 @@ fun DisplayPanel(
         ) {
             Text(
                 text = if (expression.isEmpty()) "0" else expression,
-                style = MaterialTheme.typography.headlineMedium.copy(
-                    fontWeight = FontWeight.SemiBold,
-                    fontSize = 30.sp
-                ),
+                style = MaterialTheme.typography.headlineMedium,
                 textAlign = TextAlign.End,
                 maxLines = 1,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .horizontalScroll(scrollState)
+                    .horizontalScroll(exprScroll)
             )
 
             Text(
                 text = result,
                 style = MaterialTheme.typography.titleMedium,
-                color = MaterialTheme.colorScheme.primary,
+                color = if (isError) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary,
                 textAlign = TextAlign.End,
-                maxLines = 1
+                maxLines = 1,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(resScroll)
             )
         }
     }
 }
-
 
 @Composable
 fun ButtonGrid(
@@ -314,26 +405,8 @@ fun CalculatorButtonItem(
     ) {
         Text(
             text = button.label,
-            style = MaterialTheme.typography.titleLarge.copy(
-                fontWeight = FontWeight.Medium
-            ),
+            style = MaterialTheme.typography.titleLarge,
             maxLines = 1
         )
-    }
-}
-
-@Preview(showBackground = true, widthDp = 360, heightDp = 640)
-@Composable
-fun CalculatorPortraitPreview() {
-    LAB4Theme {
-        CalculatorScreen()
-    }
-}
-
-@Preview(showBackground = true, widthDp = 640, heightDp = 360)
-@Composable
-fun CalculatorLandscapePreview() {
-    LAB4Theme {
-        CalculatorScreen()
     }
 }
